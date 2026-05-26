@@ -80,11 +80,15 @@ def compute_offline_preference_loss(
         if reference_scores is None:
             raise ValueError("DPO requires reference scores.")
         ref_margin_sum = reference_scores.chosen_logp_sum - reference_scores.rejected_logp_sum
-        # TODO(student): compute the reference-corrected DPO logits.
+        # (student): compute the reference-corrected DPO logits.
         # Hint: compare the policy margin against the frozen reference margin.
-        logits = torch.empty_like(policy_margin_sum)
-        # TODO(student): replace this with the DPO logistic loss.
-        losses = torch.empty_like(policy_margin_sum)
+        assert ref_margin_sum.shape == policy_margin_sum.shape
+        logits = policy_margin_sum - ref_margin_sum
+        # (student): replace this with the DPO logistic loss.
+        losses = torch.logsumexp(torch.cat([torch.zeros_like(policy_margin_sum).view(-1,1),
+                                            -beta * logits.view(-1,1)], dim=1),
+                                    dim=1)
+        assert losses.shape == policy_margin_sum.shape
         metrics.update(
             {
                 "preference/reference_margin_sum_mean": float(ref_margin_sum.detach().mean().item()),
