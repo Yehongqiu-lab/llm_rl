@@ -24,6 +24,10 @@ uv run modal token new
 uvx wandb login
 ```
 
+**Windows-specific fixes for the env set up:**
+- Set WANDB_API_KEY explicitly.
+- Disable MSYS path conversion by `export MSYS_NO_PATHCONV=1` before any commands.
+
 For local head-to-head LLM evaluation on the repository evaluation files, also export your own OpenAI API key:
 
 ```bash

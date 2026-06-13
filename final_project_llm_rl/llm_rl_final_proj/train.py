@@ -27,7 +27,7 @@ from llm_rl_final_proj.offline import (
     generate_samples,
     summarize_generation_rows,
 )
-from llm_rl_final_proj.offline.losses import compute_policy_and_reference_scores
+from llm_rl_final_proj.offline.losses import compute_policy_and_reference_scores, compute_KL_approx
 from llm_rl_final_proj.utils.hardware import (
     get_cuda_memory_metrics,
     get_hardware_metrics,
@@ -363,6 +363,7 @@ def main() -> None:
                 reference_scores=reference_scores,
                 example_weights=None,
             )
+            kl_approx = compute_KL_approx(model, batch=batch)
             (loss_out.loss / cfg.grad_accum_steps).backward()
             microbatch_count += 1
 
@@ -380,6 +381,7 @@ def main() -> None:
                     "train/microbatch_count": float(microbatch_count),
                     "train/lr": float(optimizer.param_groups[0]["lr"]),
                     "train/gradient_global_norm_after_clipping": grad_norm,
+                    "train/kl_approx": kl_approx,
                     **{f"train/{k}": v for k, v in loss_out.metrics.items()},
                     **get_cuda_memory_metrics(prefix="train"),
                 }

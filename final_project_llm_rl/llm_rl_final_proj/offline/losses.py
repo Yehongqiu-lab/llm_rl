@@ -6,7 +6,7 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
-from llm_rl_final_proj.models.logprobs import compute_per_token_logprobs, masked_mean_per_row
+from llm_rl_final_proj.models.logprobs import compute_per_token_logprobs, masked_mean_per_row, approx_kl_from_logprobs
 from llm_rl_final_proj.offline.batch import PreferenceBatch
 from llm_rl_final_proj.utils.peft_utils import disable_adapter_if_possible
 
@@ -40,6 +40,29 @@ def compute_policy_and_reference_scores(
                 reference_scores = _compute_sequence_scores(model, batch=batch, enable_grad=False)
     return policy_scores, reference_scores
 
+def compute_KL_approx(model: torch.nn.Module, *, batch: PreferenceBatch) -> torch.Tensor:
+    input_ids = torch.cat([batch.chosen_input_ids, batch.rejected_input_ids], dim=0)
+    attention_mask = torch.cat([batch.chosen_attention_mask, batch.rejected_attention_mask], dim=0)
+    response_mask = torch.cat([batch.chosen_response_mask, batch.rejected_response_mask], dim=0)
+    new_logprobs = compute_per_token_logprobs(
+        model,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        enable_grad=False,
+    )
+    with torch.no_grad():
+            with disable_adapter_if_possible(model):
+                ref_logprobs = compute_per_token_logprobs(
+                    model,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    enable_grad=False,
+                )
+    kl_approx = approx_kl_from_logprobs(
+        new_logprobs, 
+        ref_logprobs, 
+        mask=response_mask)
+    return kl_approx
 
 def compute_offline_preference_loss(
     *,
@@ -80,12 +103,14 @@ def compute_offline_preference_loss(
         if reference_scores is None:
             raise ValueError("DPO requires reference scores.")
         ref_margin_sum = reference_scores.chosen_logp_sum - reference_scores.rejected_logp_sum
+        ref_margin_mean = reference_scores.chosen_logp_mean - reference_scores.rejected_logp_mean
+
         # (student): compute the reference-corrected DPO logits.
         # Hint: compare the policy margin against the frozen reference margin.
-        assert ref_margin_sum.shape == policy_margin_sum.shape
-        logits = policy_margin_sum - ref_margin_sum
+        assert ref_margin_mean.shape == policy_margin_mean.shape
+        logits = policy_margin_mean - ref_margin_mean
         # (student): replace this with the DPO logistic loss.
-        losses = torch.logsumexp(torch.cat([torch.zeros_like(policy_margin_sum).view(-1,1),
+        losses = torch.logsumexp(torch.cat([torch.zeros_like(policy_margin_mean).view(-1,1),
                                             -beta * logits.view(-1,1)], dim=1),
                                     dim=1)
         assert losses.shape == policy_margin_sum.shape
@@ -99,12 +124,14 @@ def compute_offline_preference_loss(
     elif algo == "ipo":
         if reference_scores is None:
             raise ValueError("IPO requires reference scores.")
-        ref_margin_sum = reference_scores.chosen_logp_sum - reference_scores.rejected_logp_sum
-        # TODO(student): compute the reference-corrected IPO logits.
-        logits = torch.empty_like(policy_margin_sum)
+        #ref_margin_sum = reference_scores.chosen_logp_sum - reference_scores.rejected_logp_sum
+        ref_margin_mean = reference_scores.chosen_logp_mean - reference_scores.rejected_logp_mean
+
+        # (student): compute the reference-corrected IPO logits.
+        logits = policy_margin_mean - ref_margin_mean
         target_gap = 1.0 / (2.0 * beta)
-        # TODO(student): implement the squared IPO target-gap objective.
-        losses = torch.empty_like(policy_margin_sum)
+        # (student): implement the squared IPO target-gap objective.
+        losses = (logits - target_gap) ** 2
         metrics.update(
             {
                 "preference/reference_margin_sum_mean": float(ref_margin_sum.detach().mean().item()),
@@ -115,12 +142,17 @@ def compute_offline_preference_loss(
     elif algo == "aot":
         if reference_scores is None:
             raise ValueError("AOT requires reference scores.")
-        # TODO(student): convert policy/reference scores into chosen and rejected rewards,
+        # (student): convert policy/reference scores into chosen and rejected rewards,
         # sort both reward vectors, and apply a DPO-style logistic loss to the quantile gaps.
-        chosen_rewards = torch.empty_like(policy_scores.chosen_logp_sum)
-        rejected_rewards = torch.empty_like(policy_scores.rejected_logp_sum)
-        quantile_gap = torch.empty_like(chosen_rewards)
-        losses = torch.empty_like(chosen_rewards)
+        chosen_rewards = policy_scores.chosen_logp_mean - reference_scores.chosen_logp_mean
+        rejected_rewards = policy_scores.rejected_logp_mean - reference_scores.rejected_logp_mean
+        sorted_chosen_rewards, _ = torch.sort(chosen_rewards)
+        sorted_rejected_rewards, _ = torch.sort(rejected_rewards)
+        quantile_gap = sorted_chosen_rewards - sorted_rejected_rewards
+        losses = torch.logsumexp(torch.cat([torch.zeros_like(quantile_gap).view(-1, 1),
+                                            -beta * quantile_gap.view(-1, 1)], dim=1),
+                                dim=1)
+        assert losses.shape == chosen_rewards.shape
         metrics.update(
             {
                 "preference/aot_chosen_reward_mean": float(chosen_rewards.detach().mean().item()),

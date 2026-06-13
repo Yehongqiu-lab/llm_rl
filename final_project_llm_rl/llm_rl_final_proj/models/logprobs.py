@@ -17,15 +17,16 @@ def compute_per_token_logprobs(
         # and return per-token log-probabilities of the observed tokens.
         # Hint: use F.cross_entropy with reduction='none' for memory efficiency.
         B, L = input_ids.size()
-        selected = input_ids[attention_mask == 0]
-        if selected.min() == selected.max():
-            pad_token_id = selected.min().item()
-        else:
-            raise ValueError("input_ids where attention_mask==0 shoud be filled with pad_token_id!")
-        logits = model(input_ids[:, :-1])
-        logprobs = F.cross_entropy(logits.view(-1, logits.size(-1)), input_ids[:, 1:].view(-1),
-                        ignore_index=pad_token_id, reduction='none')
-        logprobs = logprobs.view(B, L - 1)
+        logits = model(
+                    input_ids=input_ids[:, :-1],
+                    attention_mask=attention_mask[:, :-1]
+                ).logits
+        targets = input_ids[:, 1:].clone()
+        targets[attention_mask[:, 1:] == 0] = -100
+        logprobs = - F.cross_entropy(logits.reshape(-1, logits.size(-1)), 
+                                   targets.reshape(-1),
+                        ignore_index=-100, reduction='none')
+        logprobs = logprobs.reshape(B, L - 1)
         return logprobs
 
 def build_completion_mask(
@@ -38,10 +39,9 @@ def build_completion_mask(
     del pad_token_id
     # (student): build a float mask of shape [B, L-1] that selects only completion tokens.
     # Be careful about the one-token shift between logits[:, :-1] and input_ids[:, 1:].
-    L = prompt_input_len
-    assert L == input_ids.shape[1]
-    completion_mask = attention_mask[:, 1:].to(dtype=torch.float)
-    assert completion_mask.shape[1] == L - 1
+    B, L = input_ids.shape
+    completion_mask = torch.zeros((B, L - 1), dtype=torch.float)
+    completion_mask[:, prompt_input_len - 1: ] = 1.0
     return completion_mask
 
 
@@ -75,5 +75,5 @@ def approx_kl_from_logprobs(
     assert ref_logprobs.shape == new_logprobs.shape
     delta = ref_logprobs - new_logprobs
     estimator = torch.exp(delta) - delta - 1
-    return masked_sum_per_row(estimator, mask).mean()
+    return torch.mean(masked_mean_per_row(estimator, mask))
     

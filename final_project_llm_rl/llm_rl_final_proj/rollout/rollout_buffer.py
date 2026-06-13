@@ -31,6 +31,19 @@ class RolloutBatch:
             task_names=self.task_names,
             completion_texts=self.completion_texts,
         )
+    
+    def select(self, indices: torch.Tensor) -> "RolloutBatch":
+        return RolloutBatch(
+            input_ids=self.input_ids[indices, :],
+            attention_mask=self.attention_mask[indices, :],
+            completion_mask=self.completion_mask[indices, :],
+            old_logprobs=self.old_logprobs[indices, :],
+            ref_logprobs=self.ref_logprobs[indices, :],
+            rewards=self.rewards[indices],
+            advantages=self.advantages[indices],
+            task_names=self.task_names,
+            completion_texts=self.completion_texts,
+        )
 
 
 def iter_minibatches(
@@ -52,19 +65,21 @@ def iter_minibatches(
             self._shuffle = shuffle
             self._generator = generator
             self._device = device
+            self._len = batch.input_ids.shape[0]
         
         def __iter__(self):
             return self
 
         def __next__(self):
-            if self._index + self._minibatch_size <= len(self._batch):
-                minibatch = self._batch[self._index:self._index + self._minibatch_size]
-                self._index += self._minibatch_size
+            if self._index < self._len:
+                mb_sz = min((self._minibatch_size, self._len - self._index))
+                minibatch = self._batch.select(torch.arange(self._index, self._index + mb_sz))
+                self._index += mb_sz
                 if self._shuffle:
-                    shuffled_idx = torch.randperm(self._minibatch_size, 
+                    shuffled_idx = torch.randperm(mb_sz, 
                                                   generator=self._generator,
                                                   device=self._device)
-                    minibatch = minibatch[shuffled_idx, :]
+                    minibatch = minibatch.select(shuffled_idx)
                 return minibatch
             raise StopIteration
     
